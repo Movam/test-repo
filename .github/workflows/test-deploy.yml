@@ -5,9 +5,9 @@ name: test-deploy
 
 on:
   push:
-    branches: [ "dmain" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "development" ]
+    branches: [ "main" ]
 
 jobs:
   deploy:
