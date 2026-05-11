@@ -17,7 +17,7 @@ env:
 
 jobs:
   build-scan-push:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, linux, x64]
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
       image_name: ${{ steps.meta.outputs.image }}
@@ -25,7 +25,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: dev-1
+          ref: pilot
 
       - name: Check for Dockerfile
         run: |
@@ -45,6 +45,7 @@ jobs:
           if [ -n "${{ github.event.inputs.image_tag }}" ]; then
             TAG="${{ github.event.inputs.image_tag }}"
           fi
+          echo "repo_name=${REPO_LOWER}" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "image=${{ env.REGISTRY }}/${{ env.REGISTRY_PROJECT }}/${REPO_LOWER}:${TAG}" >> $GITHUB_OUTPUT
 
@@ -58,9 +59,9 @@ jobs:
         if: env.SKIP != 'true'
         run: |
           IMAGE="${{ steps.meta.outputs.image }}"
-          REPO_LOWER=$(echo "${{ github.event.repository.name }}" | tr 'A-Z' 'a-z')
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
+          REPO_LOWER="${{ steps.meta.outputs.repo_name }}"
           DATE_TAG=$(date +%Y%m%d)
           docker tag "$IMAGE" "${{ env.REGISTRY }}/${{ env.REGISTRY_PROJECT }}/${REPO_LOWER}:${DATE_TAG}"
           docker push "${{ env.REGISTRY }}/${{ env.REGISTRY_PROJECT }}/${REPO_LOWER}:${DATE_TAG}"
@@ -77,13 +78,13 @@ jobs:
 
   deploy:
     needs: build-scan-push
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, linux, x64]
     if: github.ref == 'refs/heads/dev-1' && needs.build-scan-push.outputs.image_tag != ''
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: dev-1
+          ref: pilot
 
       - name: Configure kubeconfig
         run: |
@@ -130,3 +131,4 @@ jobs:
               fi
             done
           fi
+
