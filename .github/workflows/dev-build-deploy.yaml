@@ -1,0 +1,134 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag (default: SHA)'
+        required: false
+        type: string
+
+env:
+  REGISTRY: 5.189.143.93
+  REGISTRY_USER: admin
+  REGISTRY_PROJECT: movam
+
+jobs:
+  build-scan-push:
+    runs-on: [self-hosted, linux, x64]
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      image_name: ${{ steps.meta.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Check for Dockerfile
+        run: |
+          if [ ! -f "Dockerfile" ]; then
+            echo "No Dockerfile found in repository, skipping build job"
+            echo "SKIP=true" >> $GITHUB_ENV
+          else
+            echo "SKIP=false" >> $GITHUB_ENV
+          fi
+
+      - name: Set image metadata
+        if: env.SKIP != 'true'
+        id: meta
+        run: |
+          REPO_LOWER=$(echo "${{ github.event.repository.name }}" | tr 'A-Z' 'a-z')
+          TAG="${GITHUB_SHA::8}"
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          fi
+          echo "repo_name=${REPO_LOWER}" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "image=${{ env.REGISTRY }}/${{ env.REGISTRY_PROJECT }}/${REPO_LOWER}:${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Login to Harbor
+        if: env.SKIP != 'true'
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${{ env.REGISTRY }}" \
+            -u "${{ env.REGISTRY_USER }}" --password-stdin
+
+      - name: Build and push
+        if: env.SKIP != 'true'
+        run: |
+          IMAGE="${{ steps.meta.outputs.image }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          REPO_LOWER="${{ steps.meta.outputs.repo_name }}"
+          DATE_TAG=$(date +%Y%m%d)
+          docker tag "$IMAGE" "${{ env.REGISTRY }}/${{ env.REGISTRY_PROJECT }}/${REPO_LOWER}:${DATE_TAG}"
+          docker push "${{ env.REGISTRY }}/${{ env.REGISTRY_PROJECT }}/${REPO_LOWER}:${DATE_TAG}"
+
+      - name: Run Trivy vulnerability scan
+        if: env.SKIP != 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+          ignore-unfixed: true
+
+  deploy:
+    needs: build-scan-push
+    runs-on: [self-hosted, linux, x64]
+    if: github.ref == 'refs/heads/dev' && needs.build-scan-push.outputs.image_tag != ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Create image pull secret
+        run: |
+          kubectl create secret docker-registry regcred \
+            --docker-server=${{ env.REGISTRY }} \
+            --docker-username=${{ env.REGISTRY_USER }} \
+            --docker-password='${{ secrets.REGISTRY_PASSWORD }}' \
+            --namespace=movam-dev \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy manifests
+        run: |
+          IMAGE="${{ needs.build-scan-push.outputs.image_name }}"
+          REPO_LOWER=$(echo "${{ github.event.repository.name }}" | tr 'A-Z' 'a-z')
+          if [ -d "k8s" ]; then
+            for f in k8s/*.yaml; do
+              if [[ "$f" == *-deployment.yaml ]]; then
+                echo "Applying $f with image $IMAGE"
+                kubectl apply -f "$f" --namespace=movam-dev --validate=false
+                kubectl set image deployment/$REPO_LOWER -n movam-dev "*=$IMAGE" 2>/dev/null || true
+              else
+                echo "Applying $f"
+                kubectl apply -f "$f" --namespace=movam-dev
+              fi
+            done
+          else
+            echo "No k8s/ directory found, skipping deploy"
+          fi
+
+      - name: Verify rollout
+        run: |
+          if [ -d "k8s" ]; then
+            for f in k8s/*-deployment.yaml; do
+              if [ -f "$f" ]; then
+                name=$(grep "name:" "$f" | head -1 | awk '{print $2}')
+                echo "Checking rollout status for $name"
+                kubectl rollout status deployment/$name --namespace=movam-dev --timeout=120s || true
+              fi
+            done
+          fi
+
