@@ -2,7 +2,7 @@ name: Build and Deploy
 
 on:
   push:
-    branches: [dev-1]
+    branches: [dev]
   workflow_dispatch:
     inputs:
       image_tag:
@@ -25,7 +25,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: pilot
+          ref: dev
 
       - name: Check for Dockerfile
         run: |
@@ -79,12 +79,12 @@ jobs:
   deploy:
     needs: build-scan-push
     runs-on: [self-hosted, linux, x64]
-    if: github.ref == 'refs/heads/dev-1' && needs.build-scan-push.outputs.image_tag != ''
+    if: github.ref == 'refs/heads/dev' && needs.build-scan-push.outputs.image_tag != ''
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: pilot
+          ref: dev
 
       - name: Configure kubeconfig
         run: |
